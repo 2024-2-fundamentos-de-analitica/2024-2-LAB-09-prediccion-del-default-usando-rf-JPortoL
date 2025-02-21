@@ -92,3 +92,142 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+
+import os
+import json
+import zipfile
+import gzip
+import pickle
+import pandas as pd
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.impute import SimpleImputer
+from sklearn.model_selection import GridSearchCV
+from sklearn.metrics import precision_score, recall_score, f1_score, balanced_accuracy_score
+
+
+def load_data_train():
+    with zipfile.ZipFile('files/input/train_data.csv.zip', 'r') as file:
+        # print(file.namelist())
+        with file.open('train_default_of_credit_card_clients.csv') as f:
+            data = pd.read_csv(f)
+    return data
+
+def load_data_test():
+    with zipfile.ZipFile('files/input/test_data.csv.zip', 'r') as file:
+        # print(file.namelist())
+        with file.open('test_default_of_credit_card_clients.csv') as f:
+            data = pd.read_csv(f)
+    return data
+
+def clean_data(data):
+    data = data.rename(columns={'default payment next month': 'default'})
+    data = data.drop(columns='ID')
+    data = data.dropna()
+    data.loc[data['EDUCATION'] > 4, 'EDUCATION'] = 4
+    return data
+
+def split_data(data):
+    x = data.drop(columns='default')
+    y = data['default']
+    return x, y
+
+def create_pipeline():
+    categorical = ["SEX", "EDUCATION", "MARRIAGE"]
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ('cat', OneHotEncoder(), categorical)
+            ],
+        remainder='passthrough'
+            )
+    model_pipeline = Pipeline(steps=[
+        ('preprocessor', preprocessor),
+        ('classifier', RandomForestClassifier(random_state=42))
+        ])
+    
+    return model_pipeline
+
+def optimize_hyperparameters(model, x, y):
+    param_grid = {
+        'classifier__n_estimators': [200],
+        'classifier__max_depth': [None],
+        'classifier__min_samples_split': [10],
+        'classifier__min_samples_leaf': [1, 2],
+        'classifier__max_features': ['sqrt']
+    }
+
+    grid_search = GridSearchCV(
+        model,
+        param_grid,
+        cv=10,
+        scoring="balanced_accuracy",
+        n_jobs=-1,
+        verbose=2,
+        refit=True
+    )
+
+    grid_search.fit(x, y)
+
+    return grid_search
+
+def save_model(model):
+    os.makedirs('files/models', exist_ok=True)
+    with gzip.open('files/models/model.pkl.gz', 'wb') as file:
+        pickle.dump(model, file)
+
+def calculate_metrics(model, x_train, y_train, x_test, y_test):
+    metrics = []
+    
+    for dataset, x, y in zip(['train', 'test'], [x_train, x_test], [y_train, y_test]):
+        y_pred = model.predict(x)
+        
+        metrics.append({
+            'dataset': dataset,
+            'accuracy': model.score(x, y),
+            'precision': precision_score(y, y_pred, average='weighted'),
+            'recall': recall_score(y, y_pred, average='weighted'),
+            'f1_score': f1_score(y, y_pred, average='weighted'),
+            'balanced_accuracy': balanced_accuracy_score(y, y_pred)
+        })
+    
+    return metrics
+
+def calculate_confusion_matrix(model, x_train, y_train, x_test, y_test):
+    cm_matrix = []
+    for dataset, x, y in zip(['train', 'test'], [x_train, x_test], [y_train, y_test]):
+        y_pred = model.predict(x)
+        cm = pd.crosstab(y, y_pred, rownames=['True'], colnames=['Predicted'], margins=True)
+        cm_matrix.append({
+            'type': 'cm_matrix',
+            'dataset': dataset,
+            'true_0': {"predicted_0": cm[0][0], "predicted_1": cm[0][1]},
+            'true_1': {"predicted_0": cm[1][0], "predicted_1": cm[1][1]}
+        })
+    return cm_matrix
+
+
+
+if __name__ == "__main__":
+    data_train = load_data_train()
+    data_train = clean_data(data_train)
+    x_train, y_train = split_data(data_train)
+
+    data_test = load_data_test()
+    data_test = clean_data(data_test)
+    x_test, y_test = split_data(data_test)
+
+    model = create_pipeline()
+    model = optimize_hyperparameters(model, x_train, y_train)
+    save_model(model)
+
+    metrics = calculate_metrics(model, x_train, y_train, x_test, y_test)
+    os.makedirs('files/output', exist_ok=True)
+    with open('files/output/metrics.json', 'w') as file:
+        json.dump(metrics, file)
+
+    cm_matrix = calculate_confusion_matrix(model, x_train, y_train, x_test, y_test)
+    os.makedirs('files/output', exist_ok=True)
+    with open('files/output/confusion_matrix.json', 'w') as file:
+        json.dump(cm_matrix, file)
